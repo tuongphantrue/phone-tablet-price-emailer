@@ -139,6 +139,18 @@ workflow creates/updates automatically - and skips the email if nothing
 changed. Set it to `"false"` if you'd rather get an email on every
 scheduled run regardless.
 
+## Email design
+
+Each product name in the email links directly to its product page (found
+via `_build_link_map`/`_find_link` in the script - it maps each anchor's
+text on the page to its `href`, so a link-matching miss for one item never
+breaks price parsing for the rest). Items where no matching link was found
+just render as plain text instead of a link. Each retailer/category gets
+its own card with a small colored badge (see `RETAILER_ACCENT` in the
+script if you want to change the colors), alternating row shading, and a
+discount badge on any item that's on sale. `email_preview.html` in this
+repo is a static example of what the rendered email looks like.
+
 ## Notes
 
 - The workflow needs write access to push its dedup state branch. It

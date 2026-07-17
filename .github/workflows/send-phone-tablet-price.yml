@@ -1,0 +1,60 @@
+name: Send Phone/Tablet Price Email
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to push the dedup-state branch (see README.md notes)
+
+jobs:
+  send-price-email:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore dedup state from state branch
+        run: |
+          git fetch origin phone-tablet-price-state 2>/dev/null && \
+            git show origin/phone-tablet-price-state:state/last_price.json > state/last_price.json 2>/dev/null || \
+            echo "No previous state branch found - starting fresh."
+        continue-on-error: true
+
+      - name: Generate email
+        env:
+          SEND_ONLY_ON_CHANGE: "true"
+          TIMEZONE: "Asia/Ho_Chi_Minh"
+          MAX_ITEMS_PER_CATEGORY: "12"
+          # Uncomment to restrict a run to specific retailer/category keys:
+          # ONLY_RETAILER_KEYS: "cellphones_phone,cellphones_tablet"
+        run: python phone_tablet_price_emailer.py generate
+
+      - name: Send email
+        if: success()
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          PHONE_RECIPIENT: ${{ secrets.PHONE_RECIPIENT }}
+        run: python phone_tablet_price_emailer.py send
+
+      - name: Persist dedup state to state branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan phone-tablet-price-state-tmp
+          git rm -rf --cached . >/dev/null 2>&1 || true
+          mkdir -p state
+          cp -f state/last_price.json state/last_price.json 2>/dev/null || true
+          git add state/last_price.json
+          git commit -m "Update dedup state $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "Nothing to commit"
+          git push origin phone-tablet-price-state-tmp:phone-tablet-price-state --force

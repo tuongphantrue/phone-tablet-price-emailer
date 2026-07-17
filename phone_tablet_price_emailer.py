@@ -140,7 +140,7 @@ RETAILERS = [
         "key": "hoanghamobile_tablet",
         "retailer": "Hoàng Hà Mobile",
         "category": "Tablet",
-        "url": os.environ.get("HOANGHAMOBILE_TABLET_URL", "https://hoanghamobile.com/may-tinh-bang"),
+        "url": os.environ.get("HOANGHAMOBILE_TABLET_URL", "https://hoanghamobile.com/tablet"),
     },
     {
         "key": "thegioididong_phone",
@@ -254,10 +254,10 @@ SEND_ONLY_ON_CHANGE = os.environ.get("SEND_ONLY_ON_CHANGE", "false").lower() == 
 ALLOW_INSECURE_SSL_FALLBACK = os.environ.get("ALLOW_INSECURE_SSL_FALLBACK", "false").lower() == "true"
 MAX_ITEMS_PER_CATEGORY = int(os.environ.get("MAX_ITEMS_PER_CATEGORY", "12"))
 
-# Matches Vietnamese-formatted currency like "1.990.000 ₫" / "1.990.000 đ"
-# (dot as thousands separator). A listing/discount line often has two of
-# these back to back: sale price, then the crossed-out original price.
-PRICE_RE = re.compile(r"([\d]{1,3}(?:\.[\d]{3})+)\s*(?:\u20ab|đ\b)", re.IGNORECASE)
+# Matches Vietnamese-formatted currency like "1.990.000 ₫" (CellphoneS-style,
+# dot thousands separator) or "1,990,000 ₫" (Hoàng Hà Mobile-style, comma
+# thousands separator) - retailers aren't consistent about which they use.
+PRICE_RE = re.compile(r"([\d]{1,3}(?:[.,][\d]{3})+)\s*(?:\u20ab|đ\b)", re.IGNORECASE)
 
 # Lines that are clearly chrome/navigation/filters, not product names -
 # skip these even if a price happens to follow within lookahead range.
@@ -466,9 +466,11 @@ def parse_listing(html, base_url, max_items=MAX_ITEMS_PER_CATEGORY):
                 break
             # If we hit what looks like *another* product name before
             # finding a price, this line probably wasn't a product name -
-            # bail out rather than pairing it with a distant price.
-            if len(lines[j]) >= 10 and not PRICE_RE.search(lines[j]):
-                continue
+            # bail out rather than pairing it with a distant price (e.g. a
+            # spec bullet like "128GB" getting paired with the *next*
+            # product's price after skipping past the real name in between).
+            if len(lines[j]) >= 10:
+                break
 
         if not match:
             i += 1
@@ -497,8 +499,8 @@ def fetch_category(url, max_items=MAX_ITEMS_PER_CATEGORY):
 def _price_html(price, old_price):
     if old_price:
         try:
-            cur = int(price.replace(".", ""))
-            old = int(old_price.replace(".", ""))
+            cur = int(price.replace(".", "").replace(",", ""))
+            old = int(old_price.replace(".", "").replace(",", ""))
             pct = round((1 - cur / old) * 100)
             discount = f" <span style='color:#cf222e'>-{pct}%</span>"
         except (ValueError, ZeroDivisionError):

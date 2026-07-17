@@ -2,6 +2,8 @@ name: Send Phone/Tablet Price Email
 
 on:
   schedule:
+    # Every 30 minutes. Cron is always UTC - see README.md "Changing the
+    # schedule" for other examples.
     - cron: "*/30 * * * *"
   workflow_dispatch: {}
 
@@ -35,9 +37,19 @@ jobs:
           SEND_ONLY_ON_CHANGE: "true"
           TIMEZONE: "Asia/Ho_Chi_Minh"
           MAX_ITEMS_PER_CATEGORY: "12"
+          SAVE_DEBUG_HTML: "true"
           # Uncomment to restrict a run to specific retailer/category keys:
           # ONLY_RETAILER_KEYS: "cellphones_phone,cellphones_tablet"
         run: python phone_tablet_price_emailer.py generate
+
+      - name: Upload debug snapshots (only created when a retailer parses 0 items)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-html-${{ github.run_id }}
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Send email
         if: success()

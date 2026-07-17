@@ -96,7 +96,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import certifi
 import requests
@@ -180,8 +180,73 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    # Some storefronts 403 requests with no Referer at all - a plausible
+    # same-site referer (their own homepage) is enough to pass that check
+    # even though it doesn't help against a real JS challenge.
+    "Referer": "",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Dest": "document",
+    "Upgrade-Insecure-Requests": "1",
 }
+
+DEBUG_DIR = "debug"
+SAVE_DEBUG_HTML = os.environ.get("SAVE_DEBUG_HTML", "true").lower() == "true"
+
+# Substrings that strongly suggest the response is a bot-challenge/consent
+# page rather than the real listing - i.e. "0 items parsed" is not a parser
+# bug, it's that we never got the real page. Checked case-insensitively.
+BLOCK_SIGNATURES = [
+    ("cloudflare", "just a moment"),
+    ("cloudflare", "attention required"),
+    ("cloudflare", "checking your browser"),
+    ("captcha",),
+    ("verify you are human",),
+    ("access denied",),
+    ("are you a robot",),
+    ("enable javascript and cookies",),
+]
+
+# Markers that the page is a JS framework shell whose real content is
+# fetched client-side after load - the initial HTML we get from `requests`
+# won't contain product data even though it's not "blocked" in the
+# CAPTCHA/Cloudflare sense.
+SPA_SHELL_MARKERS = ['id="__next"', 'id="app"', 'id="root"', "__nuxt", "window.__NUXT__"]
+
+
+def diagnose_empty_response(html, retailer_key):
+    """Best-effort explanation for why a page returned 0 parseable items,
+    plus (optionally) a saved raw-HTML snapshot for manual inspection.
+    Returns a human-readable reason string, or None if nothing conclusive
+    was detected (could just be a markup change parse_listing() needs
+    updating for)."""
+    lower = html.lower()
+    reason = None
+    for sig in BLOCK_SIGNATURES:
+        if all(s in lower for s in sig):
+            reason = f"page looks like a bot-challenge/consent page (matched: {' + '.join(sig)})"
+            break
+    if reason is None and any(marker.lower() in lower for marker in SPA_SHELL_MARKERS):
+        reason = (
+            "page looks like a JS-framework shell (Next.js/Nuxt/React root div) - "
+            "product data is probably fetched client-side after load, not present "
+            "in this raw HTML"
+        )
+    if reason is None and len(html) < 3000:
+        reason = f"response body is unusually short ({len(html)} bytes) - likely an empty shell or error page"
+
+    if SAVE_DEBUG_HTML:
+        try:
+            os.makedirs(DEBUG_DIR, exist_ok=True)
+            path = os.path.join(DEBUG_DIR, f"{retailer_key}.html")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"  Saved raw response to {path} for inspection ({len(html)} bytes).", file=sys.stderr)
+        except OSError as e:
+            print(f"  Could not save debug HTML: {e}", file=sys.stderr)
+
+    return reason
 
 EMAIL_DIR = "email"
 STATE_FILE = os.environ.get("STATE_FILE", "state/last_price.json")
@@ -301,9 +366,13 @@ def hash_data(data):
 def fetch_page(url):
     """GET a page, verifying TLS against certifi's CA bundle explicitly.
     ALLOW_INSECURE_SSL_FALLBACK is an explicit opt-in last resort if that
-    still fails."""
+    still fails. Always logs status code + response size so a "0 items
+    parsed" run can be told apart from "we never actually got the page"."""
+    parsed = urlparse(url)
+    headers = {**HEADERS, "Referer": f"{parsed.scheme}://{parsed.netloc}/"}
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15, verify=certifi.where())
+        resp = requests.get(url, headers=headers, timeout=15, verify=certifi.where())
+        print(f"  HTTP {resp.status_code}, {len(resp.content)} bytes", file=sys.stderr)
         resp.raise_for_status()
         return resp.text
     except requests.exceptions.SSLError as e:
@@ -316,7 +385,8 @@ def fetch_page(url):
             )
             raise
         print("  ALLOW_INSECURE_SSL_FALLBACK=true - retrying with TLS verification disabled.", file=sys.stderr)
-        resp = requests.get(url, headers=HEADERS, timeout=15, verify=False)
+        resp = requests.get(url, headers=headers, timeout=15, verify=False)
+        print(f"  HTTP {resp.status_code}, {len(resp.content)} bytes", file=sys.stderr)
         resp.raise_for_status()
         return resp.text
 
@@ -421,7 +491,7 @@ def fetch_category(url, max_items=MAX_ITEMS_PER_CATEGORY):
     items = parse_listing(html, base_url=url, max_items=max_items)
     for item in items:
         item["specs"] = extract_phone_tablet_specs(item["name"])
-    return items
+    return items, html
 
 
 def _price_html(price, old_price):
@@ -582,21 +652,26 @@ def cmd_generate():
 
     for r in RETAILERS:
         print(f"Fetching {r['retailer']} - {r['category']} ({r['url']}) ...")
+        items, html = [], ""
         try:
-            items = fetch_category(r["url"])
+            items, html = fetch_category(r["url"])
         except requests.RequestException as e:
             print(f"  Failed to fetch {r['url']}: {e}", file=sys.stderr)
             had_fetch_error = True
             items = []
 
         print(f"  Parsed {len(items)} item(s).")
-        if not items:
-            print(
-                f"  0 items parsed for {r['retailer']} - {r['category']} - the page may "
-                f"render listings via JavaScript, or markup changed. Open {r['url']} "
-                f"and check parse_listing().",
-                file=sys.stderr,
-            )
+        if not items and html:
+            reason = diagnose_empty_response(html, r["key"])
+            if reason:
+                print(f"  Likely cause: {reason}.", file=sys.stderr)
+            else:
+                print(
+                    f"  0 items parsed for {r['retailer']} - {r['category']} and no obvious "
+                    f"block/SPA signature - markup may have just changed. Open {r['url']} "
+                    f"and check parse_listing() against the saved debug/{r['key']}.html.",
+                    file=sys.stderr,
+                )
         retailers_data.append({**r, "items": items})
         total_items += len(items)
 

@@ -96,6 +96,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
+from urllib.parse import urljoin
 
 import certifi
 import requests
@@ -253,6 +254,17 @@ def extract_phone_tablet_specs(name):
 
 SPEC_COLUMNS = ["RAM", "Dung lượng", "Màu"]
 
+# Accent color per retailer, used for the little badge next to each
+# section heading in the email. Falls back to a neutral blue for any
+# retailer not listed here (e.g. if you add one to RETAILERS).
+RETAILER_ACCENT = {
+    "CellphoneS": "#d70018",
+    "Hoàng Hà Mobile": "#0064d2",
+    "Thế Giới Di Động": "#eab600",
+    "FPT Shop": "#f36f21",
+}
+DEFAULT_ACCENT = "#1a5fb4"
+
 
 def norm(s):
     """Collapse whitespace/NBSP and normalize to NFC so diacritics compare
@@ -309,10 +321,39 @@ def fetch_page(url):
         return resp.text
 
 
-def parse_listing(html, max_items=MAX_ITEMS_PER_CATEGORY):
+def _build_link_map(soup):
+    """Map normalized anchor text -> absolute-able href, for every <a href>
+    on the page whose text looks name-sized. Product cards on these
+    storefronts almost always wrap the product name in a single <a>, so a
+    name line produced by get_text("\\n") will usually match an anchor's
+    own get_text() exactly. Kept separate from the line-adjacency walk so
+    a lookup miss just means "no link for this item" rather than breaking
+    price parsing."""
+    link_map = {}
+    for a in soup.find_all("a", href=True):
+        a_text = norm(a.get_text(" "))
+        if a_text and 8 <= len(a_text) <= 150 and a_text not in link_map:
+            link_map[a_text] = a["href"]
+    return link_map
+
+
+def _find_link(name, link_map):
+    if name in link_map:
+        return link_map[name]
+    # Fallback: a product name line and its wrapping anchor's text can
+    # differ slightly (extra badge text inside the <a>, etc.) - try a
+    # containment match rather than giving up on the link entirely.
+    for a_text, href in link_map.items():
+        if name in a_text or a_text in name:
+            return href
+    return None
+
+
+def parse_listing(html, base_url, max_items=MAX_ITEMS_PER_CATEGORY):
     """
     Parse a phone/tablet category page into a list of
-    {name, price, old_price} rows (old_price is None if not on sale).
+    {name, price, old_price, url} rows (old_price is None if not on sale;
+    url is None if no matching link was found for that name).
 
     Product-card markup varies by retailer and changes with theme updates,
     so rather than depend on exact structure, this walks the page's
@@ -323,8 +364,12 @@ def parse_listing(html, max_items=MAX_ITEMS_PER_CATEGORY):
     most likely renders its product grid via JavaScript rather than plain
     HTML (see module docstring) - open the URL and check with view-source,
     not just your browser, to confirm.
+
+    Links are recovered separately (see _build_link_map/_find_link) so a
+    link-matching miss never breaks name/price parsing.
     """
     soup = BeautifulSoup(html, "html.parser")
+    link_map = _build_link_map(soup)
     text = soup.get_text("\n")
     lines = [norm(l) for l in text.split("\n") if norm(l)]
 
@@ -362,8 +407,10 @@ def parse_listing(html, max_items=MAX_ITEMS_PER_CATEGORY):
         j, prices = match
         price = prices[0]
         old_price = prices[1] if len(prices) > 1 and prices[1] != prices[0] else None
+        href = _find_link(name, link_map)
+        url = urljoin(base_url, href) if href else None
         seen.add(name)
-        items.append({"name": name, "price": price, "old_price": old_price})
+        items.append({"name": name, "price": price, "old_price": old_price, "url": url})
         i = j + 1
 
     return items
@@ -371,7 +418,7 @@ def parse_listing(html, max_items=MAX_ITEMS_PER_CATEGORY):
 
 def fetch_category(url, max_items=MAX_ITEMS_PER_CATEGORY):
     html = fetch_page(url)
-    items = parse_listing(html, max_items=max_items)
+    items = parse_listing(html, base_url=url, max_items=max_items)
     for item in items:
         item["specs"] = extract_phone_tablet_specs(item["name"])
     return items
@@ -400,64 +447,95 @@ def _price_text(price, old_price):
     return f"{price} d"
 
 
+def _item_name_cell(item):
+    name_html = escape(item["name"])
+    if item.get("url"):
+        return (
+            f"<a href='{escape(item['url'])}' target='_blank' rel='noopener' "
+            f"style='color:#1a5fb4;text-decoration:none;font-weight:600;'>{name_html}</a>"
+        )
+    return f"<span style='font-weight:600;'>{name_html}</span>"
+
+
 def build_html(retailers_data, timestamp):
     sections = []
     for r in retailers_data:
+        accent = RETAILER_ACCENT.get(r["retailer"], DEFAULT_ACCENT)
+
         if not r["items"]:
             body = (
-                f"<p>Could not parse any items this run. "
-                f"Check <a href='{escape(r['url'])}'>{escape(r['url'])}</a> directly "
-                f"(the page may render its listings via JavaScript - see README.md).</p>"
+                f"<p style='color:#777;font-size:13px;margin:8px 0 0;'>"
+                f"Không lấy được sản phẩm nào ở lượt quét này. Kiểm tra trực tiếp tại "
+                f"<a href='{escape(r['url'])}' style='color:{accent};'>{escape(r['url'])}</a> "
+                f"(trang có thể tải sản phẩm bằng JavaScript - xem README.md).</p>"
             )
         else:
             header_cells = "".join(
-                f"<th style='padding:8px 12px;text-align:left;'>{escape(col)}</th>" for col in SPEC_COLUMNS
+                f"<th style='padding:10px 12px;text-align:left;font-size:12px;"
+                f"text-transform:uppercase;letter-spacing:.03em;color:#888;'>{escape(col)}</th>"
+                for col in SPEC_COLUMNS
             )
-            row_html = "\n".join(
-                f"<tr>"
-                f"<td style='padding:6px 12px;border-bottom:1px solid #eee'>{escape(item['name'])}</td>"
-                + "".join(
-                    f"<td style='padding:6px 12px;border-bottom:1px solid #eee;white-space:nowrap'>"
-                    f"{escape(item.get('specs', {}).get(col, '—'))}</td>"
+            rows = []
+            for idx, item in enumerate(r["items"]):
+                row_bg = "#fafafa" if idx % 2 else "#ffffff"
+                specs = item.get("specs", {})
+                spec_cells = "".join(
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #eee;"
+                    f"white-space:nowrap;color:#555;font-size:13px;'>{escape(specs.get(col, '—'))}</td>"
                     for col in SPEC_COLUMNS
                 )
-                + f"<td style='padding:6px 12px;border-bottom:1px solid #eee;text-align:right;white-space:nowrap'>"
-                f"{_price_html(item['price'], item['old_price'])}</td>"
-                f"</tr>"
-                for item in r["items"]
-            )
+                rows.append(
+                    f"<tr style='background:{row_bg};'>"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #eee;font-size:14px;'>"
+                    f"{_item_name_cell(item)}</td>"
+                    f"{spec_cells}"
+                    f"<td style='padding:10px 12px;border-bottom:1px solid #eee;text-align:right;"
+                    f"white-space:nowrap;font-size:14px;'>{_price_html(item['price'], item['old_price'])}</td>"
+                    f"</tr>"
+                )
             body = f"""
-<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;max-width:760px;font-family:Arial,Helvetica,sans-serif;font-size:14px;">
+<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:Arial,Helvetica,sans-serif;">
 <thead>
 <tr style="background:#f5f5f5;">
-<th style="padding:8px 12px;text-align:left;">Sản phẩm</th>
+<th style="padding:10px 12px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:#888;">Sản phẩm</th>
 {header_cells}
-<th style="padding:8px 12px;text-align:right;">Giá</th>
+<th style="padding:10px 12px;text-align:right;font-size:12px;text-transform:uppercase;letter-spacing:.03em;color:#888;">Giá</th>
 </tr>
 </thead>
 <tbody>
-{row_html}
+{''.join(rows)}
 </tbody>
 </table>"""
 
-        sections.append(
-            f"<h2 style='color:#1a5fb4;margin-top:28px;'>{escape(r['retailer'])} - {escape(r['category'])}</h2>"
-            f"<p style='color:#999;font-size:12px;margin:4px 0 8px;'>"
-            f"Nguồn: <a href='{escape(r['url'])}'>{escape(r['url'])}</a></p>"
-            f"{body}"
-        )
+        sections.append(f"""
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;max-width:760px;margin:0 0 20px;background:#ffffff;border:1px solid #eaeaea;border-radius:10px;overflow:hidden;">
+<tr>
+<td style="padding:16px 18px 4px;border-left:4px solid {accent};">
+<span style="display:inline-block;background:{accent};color:#fff;font-size:11px;font-weight:700;padding:3px 8px;border-radius:999px;letter-spacing:.02em;">{escape(r['retailer'])}</span>
+<span style="color:#333;font-size:16px;font-weight:700;margin-left:8px;">{escape(r['category'])}</span>
+<div style="color:#999;font-size:12px;margin-top:6px;">
+Nguồn: <a href="{escape(r['url'])}" style="color:{accent};">{escape(r['url'])}</a>
+</div>
+</td>
+</tr>
+<tr><td style="padding:8px 18px 16px;">{body}</td></tr>
+</table>""")
 
     return f"""\
 <html>
-<body style="margin:0; padding:20px; background:#f4f4f4; font-family:Arial,Helvetica,sans-serif;">
-<h1 style="color:#1a5fb4;">Giá điện thoại / tablet hôm nay</h1>
-<p style="color:#555;">Cập nhật {escape(timestamp)}</p>
+<body style="margin:0; padding:20px; background:#f0f1f3; font-family:Arial,Helvetica,sans-serif;">
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;max-width:760px;margin:0 0 20px;">
+<tr><td style="padding:22px 18px;background:{DEFAULT_ACCENT};border-radius:10px;">
+<h1 style="color:#fff;margin:0;font-size:20px;">📱 Giá điện thoại / tablet hôm nay</h1>
+<p style="color:#dbe7fb;margin:6px 0 0;font-size:13px;">Cập nhật {escape(timestamp)}</p>
+</td></tr>
+</table>
 {''.join(sections)}
-<p style="color:#999; font-size:12px; margin-top:24px;">
+<p style="color:#999; font-size:12px; margin-top:8px; max-width:760px;">
 Đây là giá niêm yết tại từng cửa hàng riêng lẻ tại thời điểm quét, không phải
 giá thị trường trung bình · Email tự động, chỉ mang tính tham khảo, không
-phải lời khuyên mua hàng - vui lòng kiểm tra lại giá trên website trước khi
-đặt hàng.
+phải lời khuyên mua hàng - vui lòng bấm vào từng sản phẩm để kiểm tra lại
+giá trên website trước khi đặt hàng.
 </p>
 </body>
 </html>"""
@@ -476,6 +554,8 @@ def build_plain_text(retailers_data, timestamp):
                 price_str = _price_text(item["price"], item["old_price"])
                 lines.append(f"  - {item['name']}")
                 lines.append(f"    {spec_str} | Gia: {price_str}")
+                if item.get("url"):
+                    lines.append(f"    Link: {item['url']}")
         lines.append("")
     return "\n".join(lines)
 

@@ -25,7 +25,7 @@ periodically, this kind of thing changes):
 
 | Retailer | Status | Why |
 |---|---|---|
-| CellphoneS | ✅ Works | Server-renders listings; parses cleanly. |
+| CellphoneS | ✅ Works | Server-renders listings, but wraps the whole card (name shown twice + price + specs + promo) in one `<a>` with no line breaks between them - handled by a dedicated anchor-text extraction pass (`_parse_self_contained_anchors`), not the plain line scan. |
 | Hoàng Hà Mobile | ✅ Works | Server-renders listings (uses **comma** thousands separators, e.g. `15,490,000 ₫` - handled). |
 | FPT Shop | ❌ Blocked | Page is real and server-rendered (verified by fetching it directly) - but **GitHub Actions' runner IPs get a 403** from FPT Shop's WAF. Same request succeeds from a non-datacenter IP. |
 | Thế Giới Di Động | ❌ Blocked | Also real and server-rendered - but the connection **times out** from GitHub Actions (looks like their edge is null-routing/blocklisting the datacenter IP range rather than sending an HTTP-level rejection). Its card markup also looks different enough (name/specs/price bundled into one link block) that it would likely need dedicated parsing even if the block were lifted. |

@@ -28,23 +28,36 @@ report **0 parsed items**. This script only works out of the box against
 category pages that server-render their listings. Before relying on any
 retailer/category in `RETAILERS` (see `phone_tablet_price_emailer.py`):
 
-1. Run `generate` once and check the logs for "0 items parsed" warnings.
-2. If a retailer reports 0 items, open that URL and use your browser's
-   "View Page Source" (not just inspect element) - if the product names/
-   prices aren't in the raw HTML, the listing is JS-rendered and this
-   script can't scrape it as-is.
-3. Either find a different, more static page on that retailer's site (some
-   have older SEO landing pages that still server-render), point the
-   relevant `*_URL` env var at it, or swap in a browser-automation tool
-   (Playwright/Selenium) in place of `requests.get()` for that retailer.
+1. Run `generate` once and check the logs. Every fetch now logs its HTTP
+   status code and response size, and any category that parses 0 items
+   gets a best-effort diagnosis printed right there - e.g. "page looks
+   like a bot-challenge/consent page (matched: cloudflare + just a
+   moment)" or "page looks like a JS-framework shell (Next.js/Nuxt/React
+   root div)". That tells you whether you're dealing with JS-rendered
+   content, an anti-bot challenge, or just a markup change the parser
+   needs updating for.
+2. The raw HTML for any 0-item category is also saved to `debug/<key>.html`
+   (set `SAVE_DEBUG_HTML=false` to turn this off). Open that file directly
+   - not the live page in your browser, which will run the JS the script
+   can't - to see exactly what `requests` actually received. On GitHub
+   Actions, this folder is uploaded as a downloadable "debug-html-<run
+   id>" artifact on every run (see the workflow's "Upload debug
+   snapshots" step), so you don't need to reproduce a failure locally to
+   inspect it.
+3. If it turns out to be JS-rendered or bot-protected rather than just a
+   markup change: either find a different, more static page on that
+   retailer's site (some have older SEO landing pages that still
+   server-render), point the relevant `*_URL` env var at it, or swap in a
+   browser-automation tool (Playwright/Selenium) in place of
+   `requests.get()` for that retailer.
 
 The parser (`parse_listing()` in the script) matches by *text adjacency* - a
 product-name-looking line immediately followed by a "X.XXX.XXX đ" price
 line - rather than by exact HTML structure, so it should survive minor
 theme/markup changes on the retailers that do server-render. If a
-previously-working retailer suddenly reports 0 parsed items, the page
-layout probably changed more than that - open the URL and check
-`parse_listing()`.
+previously-working retailer suddenly reports 0 parsed items with no
+block/SPA diagnosis, the page layout probably changed more than that -
+open the saved `debug/<key>.html` and check `parse_listing()`.
 
 ## One-time setup (~5 minutes)
 

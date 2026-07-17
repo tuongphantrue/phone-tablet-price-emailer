@@ -419,6 +419,79 @@ def _find_link(name, link_map):
     return None
 
 
+# href patterns that are never a product page - filtered out of the
+# anchor-based extraction pass below so nav/policy/account links never get
+# a chance to be mistaken for a product card.
+NON_PRODUCT_HREF_RE = re.compile(
+    r"^(javascript:|#|tel:|mailto:)"
+    r"|/(dia-chi-cua-hang|gio-hang|cart|tos|lien-he|tuyen-dung|sforum"
+    r"|dang-nhap|dang-ky|bao-hanh|chinh-sach|so-sanh)(/|$|\?|\.html)",
+    re.IGNORECASE,
+)
+
+
+def _extract_from_anchor_text(text):
+    """For storefronts where a single <a> wraps the ENTIRE product card -
+    name, badges, price, specs, and promo text all concatenated with no
+    block boundary between them (e.g. CellphoneS) - line-adjacency
+    scanning has nothing to split on, and ends up mis-pairing a spec
+    badge (like "9.7 inches") with a distant price. This works directly
+    on one anchor's own full text instead, which sidesteps that
+    fragmentation entirely. Returns (name, price, old_price), or None if
+    this anchor's text doesn't contain a price (i.e. it's not a
+    self-contained product-card anchor)."""
+    price_match = PRICE_RE.search(text)
+    if not price_match:
+        return None
+    cut = price_match.start()
+    installment_match = re.search(r"Trả góp", text)
+    if installment_match and installment_match.start() < cut:
+        cut = installment_match.start()
+    name = text[:cut].strip(" :-")
+    # Some storefronts repeat the name twice back-to-back in the same
+    # anchor (e.g. a visually-hidden accessibility copy plus the visible
+    # title) - collapse that down to one copy.
+    half = len(name) // 2
+    if half > 3 and name[:half].strip() == name[half:].strip():
+        name = name[:half].strip()
+    if not (8 <= len(name) <= 150):
+        return None
+    if name.lower().startswith(JUNK_NAME_PREFIXES) or JUNK_NAME_RE.match(name):
+        return None
+    prices = PRICE_RE.findall(text)
+    price = prices[0]
+    old_price = prices[1] if len(prices) > 1 and prices[1] != prices[0] else None
+    return name, price, old_price
+
+
+def _parse_self_contained_anchors(soup, base_url, max_items):
+    """First-choice extraction pass: look for <a href> product cards whose
+    own text already contains a price (see _extract_from_anchor_text).
+    Returns [] on storefronts that don't use this pattern (e.g. Hoàng Hà
+    Mobile, where the price sits outside the name-anchor) - parse_listing
+    falls back to the line-adjacency scan in that case."""
+    items = []
+    seen_hrefs = set()
+    seen_names = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if not href or href in ("/", "#") or NON_PRODUCT_HREF_RE.search(href):
+            continue
+        result = _extract_from_anchor_text(norm(a.get_text(" ")))
+        if not result:
+            continue
+        name, price, old_price = result
+        url = urljoin(base_url, href)
+        if url in seen_hrefs or name in seen_names:
+            continue
+        seen_hrefs.add(url)
+        seen_names.add(name)
+        items.append({"name": name, "price": price, "old_price": old_price, "url": url})
+        if len(items) >= max_items:
+            break
+    return items
+
+
 def parse_listing(html, base_url, max_items=MAX_ITEMS_PER_CATEGORY):
     """
     Parse a phone/tablet category page into a list of
@@ -439,6 +512,17 @@ def parse_listing(html, base_url, max_items=MAX_ITEMS_PER_CATEGORY):
     link-matching miss never breaks name/price parsing.
     """
     soup = BeautifulSoup(html, "html.parser")
+
+    # Some storefronts (CellphoneS) wrap the whole product card - name,
+    # price, specs, promo text - in one <a> with no line break between the
+    # pieces, which the line scan below can't split correctly. Try that
+    # pattern first; only fall back to line-adjacency scanning (needed for
+    # storefronts like Hoàng Hà Mobile, where price sits outside the
+    # name-anchor) if it finds nothing.
+    anchor_items = _parse_self_contained_anchors(soup, base_url, max_items)
+    if anchor_items:
+        return anchor_items
+
     link_map = _build_link_map(soup)
     text = soup.get_text("\n")
     lines = [norm(l) for l in text.split("\n") if norm(l)]

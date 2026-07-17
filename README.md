@@ -20,22 +20,37 @@ verified cross-retailer comparison. Treat the email as "what page 1 of each
 configured category currently shows," not an authoritative index - always
 check the live page before buying.
 
-**Bigger caveat specific to this domain:** several major Vietnamese phone
-retailers (CellphoneS in particular) load their product grids via
-JavaScript/AJAX rather than server-rendered HTML. A plain `requests` GET -
-which is all this script does - can't see that content, so those pages will
-report **0 parsed items**. This script only works out of the box against
-category pages that server-render their listings. Before relying on any
-retailer/category in `RETAILERS` (see `phone_tablet_price_emailer.py`):
+**Confirmed status per retailer** (as of testing on 2026-07-17 - re-verify
+periodically, this kind of thing changes):
+
+| Retailer | Status | Why |
+|---|---|---|
+| CellphoneS | ✅ Works | Server-renders listings; parses cleanly. |
+| Hoàng Hà Mobile | ✅ Works | Server-renders listings (uses **comma** thousands separators, e.g. `15,490,000 ₫` - handled). |
+| FPT Shop | ❌ Blocked | Page is real and server-rendered (verified by fetching it directly) - but **GitHub Actions' runner IPs get a 403** from FPT Shop's WAF. Same request succeeds from a non-datacenter IP. |
+| Thế Giới Di Động | ❌ Blocked | Also real and server-rendered - but the connection **times out** from GitHub Actions (looks like their edge is null-routing/blocklisting the datacenter IP range rather than sending an HTTP-level rejection). Its card markup also looks different enough (name/specs/price bundled into one link block) that it would likely need dedicated parsing even if the block were lifted. |
+
+The FPT Shop / TGDD blocks are IP/network-level, not something header
+tweaks can fix - the requests are being rejected before they ever reach
+`parse_listing()`. Two options if you want those two working:
+
+1. **Run outside GitHub Actions' shared IP range** - a self-hosted
+   runner, a residential/Vietnam-based VPS, or a proxy in front of the
+   `requests` calls. Out of scope for what this script does today.
+2. **Drop them from `RETAILERS`** and rely on CellphoneS + Hoàng Hà
+   Mobile, which both work reliably from GitHub Actions. Set
+   `ONLY_RETAILER_KEYS=cellphones_phone,cellphones_tablet,hoanghamobile_phone,hoanghamobile_tablet`
+   in the workflow to do this without editing the script.
+
+If you want to dig further yourself, or if a *previously-working*
+retailer starts reporting 0 parsed items:
 
 1. Run `generate` once and check the logs. Every fetch now logs its HTTP
    status code and response size, and any category that parses 0 items
    gets a best-effort diagnosis printed right there - e.g. "page looks
    like a bot-challenge/consent page (matched: cloudflare + just a
    moment)" or "page looks like a JS-framework shell (Next.js/Nuxt/React
-   root div)". That tells you whether you're dealing with JS-rendered
-   content, an anti-bot challenge, or just a markup change the parser
-   needs updating for.
+   root div)".
 2. The raw HTML for any 0-item category is also saved to `debug/<key>.html`
    (set `SAVE_DEBUG_HTML=false` to turn this off). Open that file directly
    - not the live page in your browser, which will run the JS the script
@@ -44,20 +59,20 @@ retailer/category in `RETAILERS` (see `phone_tablet_price_emailer.py`):
    id>" artifact on every run (see the workflow's "Upload debug
    snapshots" step), so you don't need to reproduce a failure locally to
    inspect it.
-3. If it turns out to be JS-rendered or bot-protected rather than just a
-   markup change: either find a different, more static page on that
-   retailer's site (some have older SEO landing pages that still
-   server-render), point the relevant `*_URL` env var at it, or swap in a
-   browser-automation tool (Playwright/Selenium) in place of
-   `requests.get()` for that retailer.
 
 The parser (`parse_listing()` in the script) matches by *text adjacency* - a
-product-name-looking line immediately followed by a "X.XXX.XXX đ" price
-line - rather than by exact HTML structure, so it should survive minor
-theme/markup changes on the retailers that do server-render. If a
-previously-working retailer suddenly reports 0 parsed items with no
-block/SPA diagnosis, the page layout probably changed more than that -
-open the saved `debug/<key>.html` and check `parse_listing()`.
+product-name-looking line immediately followed by a price line - rather
+than by exact HTML structure, so it should survive minor theme/markup
+changes on the retailers that do server-render. If a previously-working
+retailer suddenly reports 0 parsed items with no block/SPA diagnosis, the
+page layout probably changed more than that - open the saved
+`debug/<key>.html` and check `parse_listing()`.
+
+**Known limitation:** Hoàng Hà Mobile puts its crossed-out original price
+on a separate line from the current price (unlike CellphoneS, which puts
+both on the same line), so the discount badge/strikethrough won't show for
+HHM items even when they're on sale - only the current price is captured.
+Cosmetic only, the current price itself is correct.
 
 ## One-time setup (~5 minutes)
 
